@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Star Motion Visualizer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; font-family: 'Arial', sans-serif; }
+    canvas { display: block; position: fixed; top: 0; left: 0; }
+
+    #ui {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      pointer-events: none; z-index: 10;
+    }
+    #upload-area {
+      pointer-events: all; text-align: center;
+      padding: 40px 50px;
+      border: 2px dashed rgba(255, 200, 50, 0.4);
+      border-radius: 20px;
+      background: rgba(0, 0, 10, 0.85);
+      color: #FFD700;
+      cursor: pointer;
+      transition: all 0.3s;
+      backdrop-filter: blur(10px);
+    }
+    #upload-area:hover {
+      border-color: #FFD700;
+      background: rgba(255, 200, 50, 0.08);
+      box-shadow: 0 0 40px rgba(255, 200, 50, 0.2);
+    }
+    #upload-area h2 { font-size: 1.8em; margin-bottom: 12px; letter-spacing: 2px; }
+    #upload-area p { opacity: 0.6; font-size: 0.9em; line-height: 1.6; }
+    #upload-area .hint { margin-top: 12px; font-size: 0.75em; opacity: 0.4; }
+    #file-input { display: none; }
+
+    #hud {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      padding: 16px 24px;
+      display: none;
+      align-items: center; justify-content: space-between;
+      background: linear-gradient(transparent, rgba(0,0,0,0.6));
+      color: rgba(255, 200, 50, 0.7);
+      font-size: 13px;
+      z-index: 10;
+    }
+    #hud-left { display: flex; flex-direction: column; gap: 4px; }
+    #track-name { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #mode-display { font-size: 11px; opacity: 0.6; letter-spacing: 1px; }
+    #controls-right { display: flex; align-items: center; gap: 20px; }
+    label[for="sens"] { opacity: 0.7; }
+    #sens { width: 90px; accent-color: #FFD700; cursor: pointer; }
+    #beat-indicator {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: #FFD700; opacity: 0;
+      transition: opacity 0.05s;
+      box-shadow: 0 0 8px #FFD700;
+    }
+    #mode-hint {
+      position: fixed; top: 16px; right: 16px;
+      color: rgba(255, 200, 50, 0.4); font-size: 11px;
+      display: none; z-index: 10;
+      text-align: right; line-height: 1.9;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+
+  <div id="ui">
+    <div id="upload-area" onclick="document.getElementById('file-input').click()">
+      <h2>✦ Star Motion Visualizer</h2>
+      <p>Load your audio file to begin<br>Stars react to every beat — diffraction spikes & orbital dynamics</p>
+      <p class="hint">Supports MP3 · WAV · AAC · OGG · FLAC</p>
+    </div>
+    <input type="file" id="file-input" accept="audio/*">
+  </div>
+
+  <div id="hud">
+    <div id="hud-left">
+      <div>Now playing: <span id="track-name"></span></div>
+      <div id="mode-display">MODE: CIRCULAR ORBIT</div>
+    </div>
+    <div id="controls-right">
+      <label for="sens">Sensitivity</label>
+      <input type="range" id="sens" min="1" max="10" value="5" step="0.5">
+      <div id="beat-indicator"></div>
+    </div>
+  </div>
+
+  <div id="mode-hint">
+    Keys 1–5 · switch motion mode<br>
+    1: Linear  ·  2: Circular Orbit<br>
+    3: Lissajous  ·  4: Figure-8<br>
+    5: Random Walk
+  </div>
+
+  <script>
+  // ─── Canvas Setup ─────────────────────────────────────────────────────────
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+  let W, H;
+
+  function resize() {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    star.orbitCX = W / 2;
+    star.orbitCY = H / 2;
+    star.orbitRX = Math.min(W, H) * 0.32;
+    star.orbitRY = Math.min(W, H) * 0.20;
+  }
+  window.addEventListener('resize', resize);
+
+  // ─── Audio Engine ─────────────────────────────────────────────────────────
+  let audioCtx = null, analyser = null, freqData = null, isPlaying = false;
+  const HIST = 50;
+  const energyBuf = new Float32Array(HIST);
+  let histIdx = 0, lastBeatAt = 0;
+  const MIN_BEAT_GAP = 0.12;
+
+  function getSensitivity() { return parseFloat(document.getElementById('sens').value); }
+
+  function detectBeat() {
+    if (!analyser || !isPlaying) return { beat: false, intensity: 0 };
+    analyser.getByteFrequencyData(freqData);
+    const nyquist = audioCtx.sampleRate / 2;
+    const binHz   = nyquist / analyser.frequencyBinCount;
+    const lo = Math.max(0, Math.floor(30   / binHz));
+    const hi = Math.min(freqData.length - 1, Math.floor(3000 / binHz));
+    let energy = 0;
+    for (let i = lo; i <= hi; i++) energy += freqData[i] * freqData[i];
+    energy /= (hi - lo + 1);
+    let avg = 0;
+    for (let i = 0; i < HIST; i++) avg += energyBuf[i];
+    avg /= HIST;
+    energyBuf[histIdx] = energy;
+    histIdx = (histIdx + 1) % HIST;
+    const sens      = getSensitivity();
+    const threshold = avg * (1.5 - sens * 0.04);
+    const now       = audioCtx.currentTime;
+    const isBeat    = energy > threshold && energy > 200 && (now - lastBeatAt) > MIN_BEAT_GAP;
+    if (isBeat) lastBeatAt = now;
+    return { beat: isBeat, intensity: Math.max(0, Math.min(1, (energy - avg) / (avg * 2 + 1))) };
+  }
+
+  async function loadAudio(file) {
+    if (audioCtx) audioCtx.close();
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.25;
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    const decoded = await audioCtx.decodeAudioData(await file.arrayBuffer());
+    const src = audioCtx.createBufferSource();
+    src.buffer = decoded;
+    src.connect(analyser);
+    analyser.connect(audioCtx.destination);
+    src.start(0);
+    isPlaying = true;
+    src.onended = () => { isPlaying = false; };
+  }
+
+  // ─── Background Stars ─────────────────────────────────────────────────────
+  // Each background star is a twinkling point; ~30% show brief diffraction spikes
+  const BG = Array.from({ length: 220 }, () => ({
+    x:          Math.random(),
+    y:          Math.random(),
+    r:          Math.random() * 1.4 + 0.25,
+    phase:      Math.random() * Math.PI * 2,
+    twinkleSpd: Math.random() * 0.6 + 0.15,
+    spikeAngle: Math.random() * Math.PI,
+    spikeLen:   Math.random() * 5 + 1.5,
+    hasDiffrac: Math.random() < 0.28,
+  }));
+
+  // Transient meteor/streak stars that cross the sky and fade
+  let streaks = Array.from({ length: 7 }, makeStreak);
+  function makeStreak() {
+    return {
+      x: Math.random(), y: Math.random(),
+      angle:      Math.random() * Math.PI,
+      speed:      0.0004 + Math.random() * 0.0015,
+      trackLen:   0.04  + Math.random() * 0.09,
+      life:       0,
+      maxLife:    70 + Math.random() * 110,
+      brightness: 0.5 + Math.random() * 0.5,
+      delay:      Math.floor(Math.random() * 400), // frames before appearing
+    };
+  }
+
+  function drawBackground(beatInt) {
+    ctx.fillStyle = 'rgba(0, 0, 8, 0.18)';
+    ctx.fillRect(0, 0, W, H);
+
+    const t = performance.now() * 0.001;
+
+    // Regular stars
+    BG.forEach(s => {
+      const twk  = 0.3 + 0.55 * Math.sin(s.phase + t * s.twinkleSpd);
+      const sx   = s.x * W, sy = s.y * H;
+
+      ctx.save();
+      ctx.globalAlpha = twk * 0.9;
+      ctx.fillStyle   = `rgba(220, 230, 255, ${twk})`;
+      ctx.shadowBlur  = 2;
+      ctx.shadowColor = '#C0D0FF';
+      ctx.beginPath();
+      ctx.arc(sx, sy, s.r, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Diffraction spikes on brighter moments
+      if (s.hasDiffrac && twk > 0.55) {
+        const spikeA = (twk - 0.55) / 0.45;
+        const len    = s.spikeLen * twk * (1 + beatInt * 1.8);
+        for (let k = 0; k < 2; k++) {
+          const ang = s.spikeAngle + k * Math.PI * 0.5;
+          const grad = ctx.createLinearGradient(
+            sx - Math.cos(ang) * len, sy - Math.sin(ang) * len,
+            sx + Math.cos(ang) * len, sy + Math.sin(ang) * len
+          );
+          grad.addColorStop(0,   'rgba(200,215,255,0)');
+          grad.addColorStop(0.4, `rgba(220,235,255,${spikeA * 0.5})`);
+          grad.addColorStop(0.5, `rgba(255,255,255,${spikeA * 0.9})`);
+          grad.addColorStop(0.6, `rgba(220,235,255,${spikeA * 0.5})`);
+          grad.addColorStop(1,   'rgba(200,215,255,0)');
+          ctx.strokeStyle = grad;
+          ctx.lineWidth   = 0.7;
+          ctx.beginPath();
+          ctx.moveTo(sx - Math.cos(ang) * len, sy - Math.sin(ang) * len);
+          ctx.lineTo(sx + Math.cos(ang) * len, sy + Math.sin(ang) * len);
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    });
+
+    // Transient streaking stars
+    for (let i = 0; i < streaks.length; i++) {
+      const s = streaks[i];
+      if (s.delay > 0) { s.delay--; continue; }
+      s.life++;
+      const prog  = s.life / s.maxLife;
+      const alpha = prog < 0.18 ? prog / 0.18 : prog > 0.82 ? (1 - prog) / 0.18 : 1;
+      s.x += Math.cos(s.angle) * s.speed;
+      s.y += Math.sin(s.angle) * s.speed;
+      const x1 = s.x * W, y1 = s.y * H;
+      const len = s.trackLen * Math.min(W, H);
+      const x0  = x1 - Math.cos(s.angle) * len;
+      const y0  = y1 - Math.sin(s.angle) * len;
+      const g   = ctx.createLinearGradient(x0, y0, x1, y1);
+      g.addColorStop(0,   'rgba(255,255,255,0)');
+      g.addColorStop(0.6, `rgba(220,235,255,${alpha * s.brightness * 0.5})`);
+      g.addColorStop(1,   `rgba(255,255,255,${alpha * s.brightness})`);
+      ctx.save();
+      ctx.strokeStyle = g;
+      ctx.lineWidth   = 1.4;
+      ctx.shadowBlur  = 5;
+      ctx.shadowColor = 'rgba(200,220,255,0.9)';
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+      ctx.restore();
+      if (s.life >= s.maxLife) {
+        streaks[i] = makeStreak();
+        streaks[i].delay = 80 + Math.floor(Math.random() * 300);
+      }
+    }
+  }
+
+  // ─── Traveling Star — Motion System ───────────────────────────────────────
+  const MODES       = ['circular', 'lissajous', 'figure8', 'random', 'linear'];
+  const MODE_LABELS = {
+    circular:  'CIRCULAR ORBIT',
+    lissajous: 'LISSAJOUS',
+    figure8:   'FIGURE-8 (LEMNISCATE)',
+    random:    'RANDOM WALK',
+    linear:    'LINEAR',
+  };
+
+  const star = {
+    x: 200, y: 300,
+    vx: 0, vy: 0,
+    motionMode: 'circular',
+    motionTime: 0,
+    lastModeSwitch: 0,
+    // Orbital
+    orbitCX: 0, orbitCY: 0,
+    orbitRX: 250, orbitRY: 160,
+    orbitAngle: 0,
+    orbitSpeed: 0.013,
+    // Trail
+    trail: [], TRAIL_LEN: 130,
+    // Visual
+    recoil: 0, glow: 0,
+    baseR: 5,
+  };
+
+  function setMode(mode) {
+    star.motionMode = mode;
+    star.lastModeSwitch = star.motionTime;
+    const el = document.getElementById('mode-display');
+    if (el) el.textContent = 'MODE: ' + MODE_LABELS[mode];
+  }
+
+  function stepPosition() {
+    const T = star.motionTime;
+    switch (star.motionMode) {
+      case 'linear':
+        star.x += 2.6;
+        if (star.x > W + 80) {
+          star.x = -60;
+          star.y  = H * (0.2 + Math.random() * 0.6);
+          star.trail = [];
+        }
+        break;
+
+      case 'circular':
+        star.orbitAngle += star.orbitSpeed;
+        star.x = star.orbitCX + star.orbitRX * Math.cos(star.orbitAngle);
+        star.y = star.orbitCY + star.orbitRY * Math.sin(star.orbitAngle);
+        break;
+
+      case 'lissajous': {
+        // Classic Lissajous figure — frequency ratio 3:5, rotating phase
+        const A  = Math.min(W, H) * 0.36;
+        const B  = Math.min(W, H) * 0.26;
+        const ks = T * 0.0055;
+        star.x   = W / 2 + A * Math.cos(3 * ks + Math.PI / 4);
+        star.y   = H / 2 + B * Math.sin(5 * ks);
+        break;
+      }
+
+      case 'figure8': {
+        // Lemniscate of Bernoulli
+        const scale = Math.min(W, H) * 0.30;
+        const ks    = T * 0.0042;
+        const cosK  = Math.cos(ks);
+        const sinK  = Math.sin(ks);
+        const den   = 1 + sinK * sinK;
+        star.x = W / 2 + scale * cosK / den;
+        star.y = H / 2 + scale * 0.65 * cosK * sinK / den;
+        break;
+      }
+
+      case 'random': {
+        // Ornstein–Uhlenbeck process — biased random walk with mean-reversion
+        star.vx += (Math.random() - 0.5) * 0.8 - star.vx * 0.04;
+        star.vy += (Math.random() - 0.5) * 0.6 - star.vy * 0.04;
+        const spd = Math.sqrt(star.vx * star.vx + star.vy * star.vy);
+        if (spd > 4.5) { star.vx *= 4.5 / spd; star.vy *= 4.5 / spd; }
+        const m = 70;
+        if (star.x < m)     star.vx += 0.4;
+        if (star.x > W - m) star.vx -= 0.4;
+        if (star.y < m)     star.vy += 0.4;
+        if (star.y > H - m) star.vy -= 0.4;
+        star.x += star.vx;
+        star.y += star.vy;
+        break;
+      }
+    }
+  }
+
+  function updateStar(beatInt) {
+    stepPosition();
+    star.motionTime++;
+    star.trail.push({ x: star.x, y: star.y });
+    if (star.trail.length > star.TRAIL_LEN) star.trail.shift();
+    star.recoil *= 0.84;
+    star.glow   *= 0.87;
+
+    // Auto-cycle modes while playing
+    if (isPlaying
+        && star.motionTime - star.lastModeSwitch > 420
+        && Math.random() < 0.004) {
+      const next = MODES[(MODES.indexOf(star.motionMode) + 1) % MODES.length];
+      setMode(next);
+    }
+  }
+
+  // ─── Stellar Point Rendering ──────────────────────────────────────────────
+  // A real star (or its photographic image) shows:
+  //   • a bright Airy-disk core
+  //   • diffraction spikes (primary: H/V; secondary: diagonal)
+  //   • a soft diffuse halo
+  // The spikes flicker independently and flare on beats.
+  function drawStellarPoint(cx, cy) {
+    const t      = performance.now() * 0.001;
+    const scale  = 1 + star.recoil * 0.55;
+    const baseR  = star.baseR * scale;
+    const glow   = star.glow;
+
+    // ── Diffuse halo ──────────────────────────────────────────────────────
+    {
+      const haloR = baseR * 9 + glow * 45;
+      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, haloR);
+      g.addColorStop(0,   `rgba(255,245,190,${0.55 + glow * 0.35})`);
+      g.addColorStop(0.18,`rgba(255,210,100,${0.22 + glow * 0.18})`);
+      g.addColorStop(0.5, `rgba(255,170, 50,${0.06 + glow * 0.08})`);
+      g.addColorStop(1,   'rgba(255,120, 20,0)');
+      ctx.save();
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(cx, cy, haloR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // ── Diffraction spikes ────────────────────────────────────────────────
+    // Four spikes along H, V axes (primary) and two diagonals (secondary).
+    // Each spike has an independent flicker and the appearance/disappearance
+    // creates a dynamic, non-static effect.
+    const spikes = [
+      { angle: 0,            baseLen: 34, w: 2.0, primary: true  },
+      { angle: Math.PI * .5, baseLen: 31, w: 2.0, primary: true  },
+      { angle: Math.PI * .25,baseLen: 17, w: 1.1, primary: false },
+      { angle:-Math.PI * .25,baseLen: 17, w: 1.1, primary: false },
+    ];
+
+    spikes.forEach((sp, i) => {
+      // Each spike flickers at a distinct frequency
+      const flicker   = 0.65 + 0.35 * Math.sin(t * (1.0 + i * 0.45) + sp.angle * 2.7 + i);
+      const beatBoost = 1 + glow * 2.8;
+      const len       = (sp.baseLen + star.recoil * 28) * flicker * beatBoost * scale;
+      const alpha     = (sp.primary ? 0.88 : 0.42) * flicker;
+
+      const grad = ctx.createLinearGradient(
+        cx - Math.cos(sp.angle) * len, cy - Math.sin(sp.angle) * len,
+        cx + Math.cos(sp.angle) * len, cy + Math.sin(sp.angle) * len
+      );
+      grad.addColorStop(0,    'rgba(255,220,120,0)');
+      grad.addColorStop(0.28, `rgba(255,238,165,${alpha * 0.4})`);
+      grad.addColorStop(0.44, `rgba(255,250,215,${alpha * 0.88})`);
+      grad.addColorStop(0.5,  `rgba(255,255,255,${alpha})`);
+      grad.addColorStop(0.56, `rgba(255,250,215,${alpha * 0.88})`);
+      grad.addColorStop(0.72, `rgba(255,238,165,${alpha * 0.4})`);
+      grad.addColorStop(1,    'rgba(255,220,120,0)');
+
+      ctx.save();
+      ctx.strokeStyle = grad;
+      ctx.lineWidth   = sp.w * flicker * scale;
+      ctx.shadowBlur  = sp.primary ? 12 : 5;
+      ctx.shadowColor = '#FFD060';
+      ctx.lineCap     = 'round';
+      ctx.beginPath();
+      ctx.moveTo(cx - Math.cos(sp.angle) * len, cy - Math.sin(sp.angle) * len);
+      ctx.lineTo(cx + Math.cos(sp.angle) * len, cy + Math.sin(sp.angle) * len);
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    // ── Airy disk (bright core) ───────────────────────────────────────────
+    ctx.save();
+    const coreG = ctx.createRadialGradient(cx, cy, 0, cx, cy, baseR * 2.8);
+    coreG.addColorStop(0,   'rgba(255,255,255,1)');
+    coreG.addColorStop(0.28,'rgba(255,248,208,0.92)');
+    coreG.addColorStop(0.65,'rgba(255,218,130,0.45)');
+    coreG.addColorStop(1,   'rgba(255,185, 60,0)');
+    ctx.fillStyle  = coreG;
+    ctx.shadowBlur = 22 + glow * 42;
+    ctx.shadowColor= '#FFFAE0';
+    ctx.beginPath();
+    ctx.arc(cx, cy, baseR * 2.8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // ── Innermost bright point ────────────────────────────────────────────
+    ctx.save();
+    ctx.fillStyle  = '#FFFFFF';
+    ctx.shadowBlur = 14 + glow * 22;
+    ctx.shadowColor= '#FFFFFF';
+    ctx.beginPath();
+    ctx.arc(cx, cy, baseR * 0.55, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawTravelStar() {
+    const len = star.trail.length;
+    if (len < 2) return;
+
+    // Comet-tail trail: each segment widens and brightens toward the head
+    for (let i = 1; i < len; i++) {
+      const t1  = i / len;
+      ctx.save();
+      ctx.globalAlpha = t1 * t1 * 0.52;
+      ctx.strokeStyle = `hsl(${20 + t1 * 35}, 100%, ${45 + t1 * 32}%)`;
+      ctx.lineWidth   = t1 * 5;
+      ctx.lineCap     = 'round';
+      ctx.shadowBlur  = 10;
+      ctx.shadowColor = '#FF9900';
+      ctx.beginPath();
+      ctx.moveTo(star.trail[i - 1].x, star.trail[i - 1].y);
+      ctx.lineTo(star.trail[i].x,     star.trail[i].y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    drawStellarPoint(star.x, star.y);
+  }
+
+  // ─── Explosions ───────────────────────────────────────────────────────────
+  let particles = [], shockwaves = [];
+
+  function triggerExplosion(x, y, intensity) {
+    shockwaves.push({ x, y, r: 5, maxR: 65 + intensity * 185, life: 1 });
+    if (intensity > 0.5)
+      shockwaves.push({ x, y, r: 5, maxR: 105 + intensity * 225, life: 0.7 });
+
+    const nDebris = Math.floor(28 + intensity * 85);
+    for (let i = 0; i < nDebris; i++) {
+      const ang = Math.random() * Math.PI * 2;
+      const spd = (1 + Math.random() * 5) * (0.4 + intensity * 1.9);
+      particles.push({
+        x, y,
+        vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd - Math.random() * 1.5,
+        life: 1, decay: 0.012 + Math.random() * 0.026,
+        sz: (1.5 + Math.random() * 4) * (0.5 + intensity * 0.8),
+        hue: Math.random() < 0.6 ? 30 + Math.random() * 40 : 200 + Math.random() * 80,
+        type: 'dot',
+      });
+    }
+    const nSparks = Math.floor(14 + intensity * 38);
+    for (let i = 0; i < nSparks; i++) {
+      const ang = Math.random() * Math.PI * 2;
+      const spd = (3 + Math.random() * 9) * (0.5 + intensity * 1.2);
+      particles.push({
+        x, y, vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
+        life: 1, decay: 0.018 + Math.random() * 0.04,
+        sz: 1.2 + intensity, hue: 45 + Math.random() * 25,
+        type: 'spark', trail: [],
+      });
+    }
+    particles.push({ x, y, vx: 0, vy: 0, life: 1, decay: 0.12,
+      sz: 22 + intensity * 65, hue: 50, type: 'flash' });
+
+    // Strong beats can flip motion mode
+    if (intensity > 0.65 && isPlaying
+        && star.motionTime - star.lastModeSwitch > 200
+        && Math.random() < 0.38) {
+      const others = MODES.filter(m => m !== star.motionMode);
+      setMode(others[Math.floor(Math.random() * others.length)]);
+    }
+  }
+
+  function updateExplosions() {
+    shockwaves = shockwaves.filter(s => s.life > 0);
+    shockwaves.forEach(s => { s.r += (s.maxR - s.r) * 0.12; s.life -= 0.035; });
+
+    particles = particles.filter(p => p.life > 0);
+    particles.forEach(p => {
+      if (p.type === 'spark' && p.trail) {
+        p.trail.push({ x: p.x, y: p.y });
+        if (p.trail.length > 7) p.trail.shift();
+      }
+      p.x  += p.vx; p.y += p.vy;
+      p.vy += 0.07;
+      p.vx *= 0.975; p.vy *= 0.975;
+      p.life -= p.decay;
+    });
+  }
+
+  function drawExplosions() {
+    shockwaves.forEach(s => {
+      ctx.save();
+      const g = ctx.createRadialGradient(s.x, s.y, s.r * 0.8, s.x, s.y, s.r);
+      g.addColorStop(0,   'rgba(255,180,30,0)');
+      g.addColorStop(0.5, `rgba(255,200,60,${s.life * 0.4})`);
+      g.addColorStop(1,   'rgba(255,100,0,0)');
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255,210,80,${s.life * 0.7})`;
+      ctx.lineWidth   = 2.5 * s.life;
+      ctx.shadowBlur  = 15;
+      ctx.shadowColor = '#FF8800';
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    particles.forEach(p => {
+      ctx.save();
+      ctx.globalAlpha = p.life;
+      ctx.shadowBlur  = 8;
+      ctx.shadowColor = `hsl(${p.hue},100%,60%)`;
+
+      if (p.type === 'flash') {
+        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.sz);
+        g.addColorStop(0,   `rgba(255,255,220,${p.life})`);
+        g.addColorStop(0.4, `rgba(255,200,50,${p.life * 0.6})`);
+        g.addColorStop(1,   'rgba(255,100,0,0)');
+        ctx.fillStyle = g; ctx.shadowBlur = 40; ctx.shadowColor = '#FFFFFF';
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.sz, 0, Math.PI * 2); ctx.fill();
+
+      } else if (p.type === 'spark' && p.trail && p.trail.length > 1) {
+        ctx.strokeStyle = `hsl(${p.hue},100%,75%)`;
+        ctx.lineWidth   = p.sz; ctx.lineCap = 'round';
+        ctx.beginPath();
+        p.trail.forEach((pt, i) => {
+          ctx.globalAlpha = p.life * (i / p.trail.length) * 0.8;
+          i === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y);
+        });
+        ctx.lineTo(p.x, p.y); ctx.stroke();
+
+      } else {
+        ctx.fillStyle = `hsl(${p.hue},100%,70%)`;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.sz, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.restore();
+    });
+  }
+
+  // ─── Main Loop ────────────────────────────────────────────────────────────
+  const beatDot = document.getElementById('beat-indicator');
+
+  function animate() {
+    requestAnimationFrame(animate);
+    let beatInt = 0, isBeat = false;
+    if (isPlaying) {
+      const r = detectBeat();
+      isBeat = r.beat; beatInt = r.intensity;
+      if (isBeat) {
+        triggerExplosion(star.x, star.y, beatInt);
+        star.recoil = 1; star.glow = 1;
+        beatDot.style.opacity = '1';
+        setTimeout(() => beatDot.style.opacity = '0', 80);
+      }
+    }
+    drawBackground(beatInt);
+    updateStar(beatInt);
+    updateExplosions();
+    drawExplosions();
+    drawTravelStar();
+  }
+
+  // ─── Keyboard: manual mode switch ─────────────────────────────────────────
+  window.addEventListener('keydown', e => {
+    const map = { '1': 'linear', '2': 'circular', '3': 'lissajous', '4': 'figure8', '5': 'random' };
+    if (map[e.key]) setMode(map[e.key]);
+  });
+
+  // ─── File Input ───────────────────────────────────────────────────────────
+  document.getElementById('file-input').addEventListener('change', async e => {
+    const file = e.target.files[0]; if (!file) return;
+    document.getElementById('upload-area').style.display = 'none';
+    document.getElementById('hud').style.display         = 'flex';
+    document.getElementById('mode-hint').style.display   = 'block';
+    document.getElementById('track-name').textContent    = file.name;
+    try { await loadAudio(file); }
+    catch (err) {
+      console.error(err);
+      document.getElementById('track-name').textContent = 'Error — try a different format';
+    }
+  });
+
+  // ─── Init ─────────────────────────────────────────────────────────────────
+  resize();
+  star.x = W / 2; star.y = H / 2;
+  animate();
+  </script>
+</body>
+</html>
