@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Star as Gas Cloud — Physics Simulation</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; color: #ccc; }
+    canvas { display: block; position: fixed; top: 0; left: 0; }
+
+    #info-panel {
+      position: fixed; top: 16px; left: 16px;
+      background: rgba(0,0,0,0.75);
+      border: 1px solid rgba(255,200,80,0.2);
+      border-radius: 10px;
+      padding: 14px 18px;
+      font-size: 12px;
+      line-height: 2;
+      backdrop-filter: blur(6px);
+      z-index: 20;
+      min-width: 190px;
+    }
+    #info-panel h3 {
+      font-size: 13px; letter-spacing: 2px;
+      color: #FFD080; margin-bottom: 6px;
+      font-weight: normal;
+    }
+    .zone-row { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+    .zone-row:hover { color: #fff; }
+    .zone-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .zone-row.active .zone-name { color: #FFE080; }
+
+    #legend {
+      position: fixed; bottom: 16px; left: 16px;
+      background: rgba(0,0,0,0.65);
+      border: 1px solid rgba(255,200,80,0.15);
+      border-radius: 8px; padding: 12px 16px;
+      font-size: 11px; line-height: 1.8;
+      backdrop-filter: blur(4px);
+      z-index: 20; max-width: 260px;
+      color: rgba(200,200,200,0.75);
+    }
+    #legend strong { color: #FFD080; font-weight: normal; }
+    #title-badge {
+      position: fixed; top: 16px; right: 16px;
+      text-align: right; z-index: 20;
+      color: rgba(255,210,80,0.6); font-size: 11px; line-height: 1.8;
+    }
+    #title-badge h2 { font-size: 15px; color: rgba(255,210,80,0.9); letter-spacing: 2px; font-weight: normal; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+
+  <div id="info-panel">
+    <h3>⊙ STELLAR ZONES</h3>
+    <div class="zone-row" id="row-corona">
+      <div class="zone-dot" style="background:#80AAFF"></div>
+      <span class="zone-name">Corona  ·  1–3 MK</span>
+    </div>
+    <div class="zone-row" id="row-chrom">
+      <div class="zone-dot" style="background:#FF7050"></div>
+      <span class="zone-name">Chromosphere  ·  25 kK</span>
+    </div>
+    <div class="zone-row" id="row-photo">
+      <div class="zone-dot" style="background:#FFE070"></div>
+      <span class="zone-name">Photosphere  ·  5,778 K</span>
+    </div>
+    <div class="zone-row" id="row-conv">
+      <div class="zone-dot" style="background:#FFA040"></div>
+      <span class="zone-name">Convective Zone</span>
+    </div>
+    <div class="zone-row" id="row-rad">
+      <div class="zone-dot" style="background:#FFCC80"></div>
+      <span class="zone-name">Radiative Zone</span>
+    </div>
+    <div class="zone-row" id="row-core">
+      <div class="zone-dot" style="background:#A0BFFF"></div>
+      <span class="zone-name">Core  ·  15 MK</span>
+    </div>
+  </div>
+
+  <div id="legend">
+    <strong>DYNAMICS</strong><br>
+    <span style="color:#A0BFFF">●</span> Core: thermal fusion, fast random motion<br>
+    <span style="color:#FFCC80">●</span> Radiative: photon diffusion, slow random walk<br>
+    <span style="color:#FFA040">●</span> Convective: rising hot plasma, sinking cool<br>
+    <span style="color:#FFE070">●</span> Granules: photosphere convection cells<br>
+    <span style="color:#FF7050">|</span> Spicules: chromospheric plasma jets<br>
+    <span style="color:#80AAFF">∿</span> Coronal loops: magnetic field lines
+  </div>
+
+  <div id="title-badge">
+    <h2>GAS CLOUD STAR</h2>
+    Solar-type physics simulation<br>
+    differential rotation · convection · corona
+  </div>
+
+  <script>
+  // ─── Canvas & Constants ────────────────────────────────────────────────────
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+  let W, H, CX, CY, R;   // R = photosphere radius
+
+  // Zone radii as fractions of R
+  const F_CORE  = 0.20;   // core boundary
+  const F_RAD   = 0.65;   // radiative→convective transition
+  const F_CONV  = 1.00;   // convective→photosphere (= R)
+  const F_CHROM = 1.10;   // photosphere→chromosphere
+  const F_CORONA= 2.40;   // outer corona
+
+  function resize() {
+    W  = canvas.width  = window.innerWidth;
+    H  = canvas.height = window.innerHeight;
+    CX = W / 2; CY = H / 2;
+    R  = Math.min(W, H) * 0.28;
+  }
+  window.addEventListener('resize', () => { resize(); rebuildAll(); });
+
+  let simTime = 0;
+
+  // ─── Distant Background Stars ─────────────────────────────────────────────
+  let bgStars = [];
+  function makeBgStars() {
+    bgStars = Array.from({ length: 300 }, () => ({
+      x: Math.random(), y: Math.random(),
+      r: Math.random() * 1.2 + 0.2,
+      phase: Math.random() * Math.PI * 2,
+      spd: Math.random() * 0.3 + 0.08,
+    }));
+  }
+  function drawBgStars() {
+    const t = simTime * 0.016;
+    bgStars.forEach(s => {
+      const a = 0.2 + 0.3 * Math.sin(s.phase + t * s.spd);
+      ctx.fillStyle = `rgba(200,215,255,${a})`;
+      ctx.beginPath();
+      ctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  // ─── Granule System (photosphere convection cells) ────────────────────────
+  // Each granule has a bright center (hot upflowing plasma) and dark edges.
+  // Granules drift with differential rotation and have a finite lifespan.
+  const N_GRAN = 65;
+  let granules = [];
+
+  function makeGranule() {
+    const r     = (F_RAD + 0.35 + Math.random() * (1 - F_RAD - 0.35)) * R;
+    const theta = Math.random() * Math.PI * 2;
+    return {
+      cx: CX + r * Math.cos(theta),
+      cy: CY + r * Math.sin(theta),
+      r:  R * (0.05 + Math.random() * 0.08),  // granule radius
+      age: 0,
+      life: 240 + Math.random() * 200,
+      omega: 0, // differential rotation angular velocity
+      // latitude for differential rotation
+      lat: Math.abs(Math.sin(theta)),
+    };
+  }
+
+  function initGranules() {
+    granules = Array.from({ length: N_GRAN }, makeGranule);
+    granules.forEach(g => { g.age = Math.random() * g.life; });
+  }
+
+  function updateGranules() {
+    granules.forEach((g, i) => {
+      g.age++;
+      if (g.age > g.life) { granules[i] = makeGranule(); return; }
+      // Differential rotation: equator faster than poles
+      // omega_eq ~ 2.87e-6 rad/s, omega_pole ~ 2.02e-6 rad/s → simplified
+      const omega = 0.0006 * (1 - 0.32 * g.lat * g.lat);
+      const dx = g.cx - CX, dy = g.cy - CY;
+      const curR = Math.sqrt(dx * dx + dy * dy);
+      const curTheta = Math.atan2(dy, dx);
+      const newTheta = curTheta + omega;
+      g.cx = CX + curR * Math.cos(newTheta);
+      g.cy = CY + curR * Math.sin(newTheta);
+    });
+  }
+
+  // ─── Velocity Field: Convective Zone ──────────────────────────────────────
+  // Physical model:
+  //   v = v_rotation + v_convection + v_buoyancy
+  // Differential rotation: azimuthal component, varies with latitude
+  // Convection: each granule acts as a flow source (outward at center)
+  // Buoyancy: hot plasma at inner boundary → outward, cool at photosphere → inward
+
+  const OMEGA_EQ   = 0.00065;  // equatorial rotation rate (rad/frame)
+  const BUOYANCY   = 0.12;     // buoyancy coefficient
+  const CONV_STR   = 0.55;     // convective strength
+
+  function convVelocity(x, y) {
+    const dx   = x - CX, dy = y - CY;
+    const rr   = Math.sqrt(dx * dx + dy * dy) || 0.001;
+    const sinLat = Math.abs(dy / rr);
+
+    // 1. Differential rotation
+    const omega = OMEGA_EQ * (1 - 0.28 * sinLat * sinLat);
+    let vx = -dy * omega;
+    let vy =  dx * omega;
+
+    // 2. Granule-driven convection — each granule is a local flow source
+    for (const g of granules) {
+      const gdx = x - g.cx, gdy = y - g.cy;
+      const gd2 = gdx * gdx + gdy * gdy;
+      const sig  = g.r;
+      const fac  = CONV_STR * Math.exp(-gd2 / (2.2 * sig * sig));
+      const gd   = Math.sqrt(gd2) || 0.001;
+      // Outward from granule center = upwelling hot plasma
+      vx += (gdx / gd) * fac;
+      vy += (gdy / gd) * fac;
+    }
+
+    // 3. Radial buoyancy: plasma fraction of (F_CONV - F_RAD) region
+    const normR = (rr - F_RAD * R) / ((F_CONV - F_RAD) * R + 1);
+    const buoy  = BUOYANCY * (0.5 - normR); // +ve near inner → rises
+    vx += (dx / rr) * buoy;
+    vy += (dy / rr) * buoy;
+
+    return { vx, vy };
+  }
+
+  // ─── Convective Zone Particles ────────────────────────────────────────────
+  const N_CONV = 480;
+  let convParts = [];
+
+  function makeConvPart() {
+    const r     = (F_RAD + Math.random() * (F_CONV - F_RAD)) * R;
+    const theta = Math.random() * Math.PI * 2;
+    return {
+      x: CX + r * Math.cos(theta),
+      y: CY + r * Math.sin(theta),
+      vx: 0, vy: 0,
+      temp: 0.5,  // temperature proxy 0=cool, 1=hot
+      sz: 1.2 + Math.random() * 2.2,
+    };
+  }
+
+  function initConvParts() {
+    convParts = Array.from({ length: N_CONV }, makeConvPart);
+  }
+
+  function updateConvParts() {
+    for (let i = 0; i < convParts.length; i++) {
+      const p = convParts[i];
+      const vel = convVelocity(p.x, p.y);
+      p.vx = p.vx * 0.88 + vel.vx * 0.12;
+      p.vy = p.vy * 0.88 + vel.vy * 0.12;
+      p.x += p.vx;
+      p.y += p.vy;
+      const dx = p.x - CX, dy = p.y - CY;
+      const r  = Math.sqrt(dx * dx + dy * dy);
+      p.temp   = 1 - (r - F_RAD * R) / ((F_CONV - F_RAD) * R + 1);
+      p.temp   = Math.max(0, Math.min(1, p.temp));
+      if (r < F_RAD * R - 8 || r > F_CONV * R + 8) {
+        convParts[i] = makeConvPart();
+      }
+    }
+  }
+
+  // ─── Radiative Zone "Photon" Walkers ──────────────────────────────────────
+  // In the real Sun, photons take ~100,000 years to diffuse from core to surface.
+  // Here we visualize the random-walk diffusion process conceptually.
+  const N_RAD = 280;
+  let radParts = [];
+
+  function makeRadPart() {
+    const r     = (F_CORE + Math.random() * (F_RAD - F_CORE)) * R;
+    const theta = Math.random() * Math.PI * 2;
+    return {
+      x: CX + r * Math.cos(theta),
+      y: CY + r * Math.sin(theta),
+      vx: (Math.random() - 0.5) * 0.4,
+      vy: (Math.random() - 0.5) * 0.4,
+      stepTimer: 0,
+      stepInterval: 4 + Math.floor(Math.random() * 8), // frames between direction changes
+      brightness: 0.3 + Math.random() * 0.5,
+    };
+  }
+
+  function initRadParts() {
+    radParts = Array.from({ length: N_RAD }, makeRadPart);
+  }
+
+  function updateRadParts() {
+    for (let i = 0; i < radParts.length; i++) {
+      const p = radParts[i];
+      p.stepTimer++;
+      if (p.stepTimer >= p.stepInterval) {
+        // New random direction (random walk / scattering event)
+        const ang = Math.random() * Math.PI * 2;
+        const spd = 0.3 + Math.random() * 0.5;
+        p.vx = Math.cos(ang) * spd;
+        p.vy = Math.sin(ang) * spd;
+        p.stepTimer = 0;
+        p.stepInterval = 4 + Math.floor(Math.random() * 8);
+      }
+      // Slight net outward drift (photons do escape eventually)
+      const dx = p.x - CX, dy = p.y - CY;
+      const r  = Math.sqrt(dx * dx + dy * dy) || 1;
+      p.vx += (dx / r) * 0.005;
+      p.vy += (dy / r) * 0.005;
+
+      p.x += p.vx;
+      p.y += p.vy;
+
+      const nr = Math.sqrt((p.x - CX) ** 2 + (p.y - CY) ** 2);
+      if (nr < F_CORE * R || nr > F_RAD * R + 5) {
+        radParts[i] = makeRadPart();
+      }
+    }
+  }
+
+  // ─── Core Particles (thermal + fusion) ────────────────────────────────────
+  const N_CORE = 220;
+  let coreParts = [];
+
+  function makeCorePart() {
+    const r     = Math.random() * F_CORE * R;
+    const theta = Math.random() * Math.PI * 2;
+    const spd   = 1.5 + Math.random() * 2.8; // very fast (hot!)
+    const ang   = Math.random() * Math.PI * 2;
+    return {
+      x: CX + r * Math.cos(theta),
+      y: CY + r * Math.sin(theta),
+      vx: Math.cos(ang) * spd,
+      vy: Math.sin(ang) * spd,
+      life: 0.6 + Math.random() * 0.4,
+      sz: 0.8 + Math.random() * 1.5,
+      hue: 200 + Math.random() * 60, // blue-violet for hot plasma
+    };
+  }
+
+  function initCoreParts() {
+    coreParts = Array.from({ length: N_CORE }, makeCorePart);
+  }
+
+  function updateCoreParts() {
+    for (let i = 0; i < coreParts.length; i++) {
+      const p = coreParts[i];
+      p.x += p.vx; p.y += p.vy;
+      // Random thermal scatter
+      if (Math.random() < 0.04) {
+        const ang = Math.random() * Math.PI * 2;
+        const spd = 1.5 + Math.random() * 2.8;
+        p.vx = Math.cos(ang) * spd;
+        p.vy = Math.sin(ang) * spd;
+      }
+      const dx = p.x - CX, dy = p.y - CY;
+      const r  = Math.sqrt(dx * dx + dy * dy);
+      if (r > F_CORE * R) { coreParts[i] = makeCorePart(); }
+    }
+  }
+
+  // Fusion flash events — brief bright bursts in the core
+  let fusionFlashes = [];
+  function maybeFusion() {
+    if (Math.random() < 0.025) {
+      const r     = Math.random() * F_CORE * R * 0.7;
+      const theta = Math.random() * Math.PI * 2;
+      fusionFlashes.push({
+        x: CX + r * Math.cos(theta),
+        y: CY + r * Math.sin(theta),
+        life: 1.0, decay: 0.08 + Math.random() * 0.12,
+        sz: 3 + Math.random() * 8,
+      });
+    }
+    fusionFlashes = fusionFlashes.filter(f => f.life > 0);
+    fusionFlashes.forEach(f => { f.life -= f.decay; });
+  }
+
+  // ─── Chromosphere Spicules ─────────────────────────────────────────────────
+  // Spicules are thin (~300 km wide, ~10,000 km tall) plasma jets that shoot
+  // upward from the photosphere into the chromosphere.
+  const N_SPIC = 90;
+  let spicules = [];
+
+  function makeSpicule() {
+    const theta   = Math.random() * Math.PI * 2;
+    const maxLen  = (F_CHROM - 1.0) * R * (0.25 + Math.random() * 0.75);
+    const life    = 70 + Math.random() * 130;
+    return {
+      theta,
+      len: 0, maxLen,
+      age: 0, life,
+      width: 0.4 + Math.random() * 1.2,
+      // lateral wobble due to magnetic pressure
+      wobble: (Math.random() - 0.5) * 0.04,
+    };
+  }
+
+  function initSpicules() {
+    spicules = Array.from({ length: N_SPIC }, makeSpicule);
+    spicules.forEach(s => { s.age = Math.random() * s.life; });
+  }
+
+  function updateSpicules() {
+    spicules.forEach((s, i) => {
+      s.age++;
+      const t = s.age / s.life;
+      s.len   = s.maxLen * (t < 0.35 ? t / 0.35 : t > 0.7 ? (1 - t) / 0.3 : 1);
+      s.theta += s.wobble * 0.001;
+      if (s.age >= s.life) { spicules[i] = makeSpicule(); }
+    });
+  }
+
+  // ─── Coronal Loops ─────────────────────────────────────────────────────────
+  // Magnetic loops connecting two footpoints on the photosphere, filled with
+  // hot (1–3 MK) plasma. They evolve slowly and carry plasma blobs along them.
+  const N_LOOPS = 18;
+  let loops = [];
+
+  function makeLoop() {
+    const theta1 = Math.random() * Math.PI * 2;
+    const sep    = 0.12 + Math.random() * 0.55; // angular separation
+    const theta2 = theta1 + sep;
+    const midTh  = theta1 + sep * 0.5;
+    // Loop apex: extends into corona
+    const apexR  = R * (1.1 + Math.random() * 0.9);
+    return {
+      theta1, theta2,
+      cpx: CX + apexR * Math.cos(midTh),
+      cpy: CY + apexR * Math.sin(midTh),
+      age: 0,
+      life: 500 + Math.random() * 800,
+      bri:  0.15 + Math.random() * 0.55,
+      // plasma blob position along the loop (0→1)
+      pt:   Math.random(),
+      pspd: 0.002 + Math.random() * 0.004,
+      // slow drift of the footpoints
+      drift1: (Math.random() - 0.5) * 0.0002,
+      drift2: (Math.random() - 0.5) * 0.0002,
+    };
+  }
+
+  function initLoops() {
+    loops = Array.from({ length: N_LOOPS }, makeLoop);
+    loops.forEach(l => { l.age = Math.random() * l.life; });
+  }
+
+  function updateLoops() {
+    loops.forEach((l, i) => {
+      l.age++;
+      l.pt = (l.pt + l.pspd) % 1;
+      l.theta1 += l.drift1;
+      l.theta2 += l.drift2;
+      // Recompute apex
+      const midTh = l.theta1 + (l.theta2 - l.theta1) * 0.5;
+      const apexR = R * (1.1 + 0.6 * Math.abs(Math.sin(l.age * 0.002)));
+      l.cpx = CX + apexR * Math.cos(midTh);
+      l.cpy = CY + apexR * Math.sin(midTh);
+      if (l.age >= l.life) { loops[i] = makeLoop(); }
+    });
+  }
+
+  // ─── Solar Wind Particles ─────────────────────────────────────────────────
+  // Plasma escaping along open field lines. Originates near the photosphere,
+  // flows outward. Slight spiral due to rotation (Parker spiral).
+  const N_WIND = 140;
+  let wind = [];
+
+  function makeWind() {
+    const theta = Math.random() * Math.PI * 2;
+    const r0    = R * (0.98 + Math.random() * 0.06);
+    return {
+      x: CX + r0 * Math.cos(theta),
+      y: CY + r0 * Math.sin(theta),
+      spd:    0.6 + Math.random() * 1.4,
+      theta:  theta,
+      spiral: 0.008, // rotation angle added per frame (Parker spiral)
+      life:   1.0,
+      sz:     0.6 + Math.random() * 1.0,
+    };
+  }
+
+  function initWind() {
+    wind = Array.from({ length: N_WIND }, makeWind);
+  }
+
+  function updateWind() {
+    for (let i = 0; i < wind.length; i++) {
+      const p = wind[i];
+      // Parker spiral: radial outflow + azimuthal rotation
+      p.theta += p.spiral * (R / (Math.sqrt((p.x - CX) ** 2 + (p.y - CY) ** 2) || R));
+      p.x     += Math.cos(p.theta) * p.spd;
+      p.y     += Math.sin(p.theta) * p.spd;
+      p.life  -= 0.003;
+      const r = Math.sqrt((p.x - CX) ** 2 + (p.y - CY) ** 2);
+      if (p.life <= 0 || r > F_CORONA * R * 0.9) { wind[i] = makeWind(); }
+    }
+  }
+
+  // ─── Drawing ───────────────────────────────────────────────────────────────
+
+  function drawBackground() {
+    ctx.fillStyle = '#00000A';
+    ctx.fillRect(0, 0, W, H);
+    drawBgStars();
+  }
+
+  // Corona: large faint radial glow
+  function drawCorona() {
+    const g = ctx.createRadialGradient(CX, CY, R * 0.9, CX, CY, F_CORONA * R);
+    g.addColorStop(0,   'rgba(140,190,255,0.20)');
+    g.addColorStop(0.12,'rgba(100,160,255,0.10)');
+    g.addColorStop(0.35,'rgba( 80,130,220,0.04)');
+    g.addColorStop(0.65,'rgba( 60,100,200,0.015)');
+    g.addColorStop(1,   'rgba( 40, 80,180,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(CX, CY, F_CORONA * R, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Coronal loops with flowing plasma blobs
+  function drawLoops() {
+    loops.forEach(l => {
+      const t     = l.age / l.life;
+      const alpha = l.bri * (t < 0.08 ? t / 0.08 : t > 0.92 ? (1 - t) / 0.08 : 1);
+      const fx1   = CX + R * Math.cos(l.theta1);
+      const fy1   = CY + R * Math.sin(l.theta1);
+      const fx2   = CX + R * Math.cos(l.theta2);
+      const fy2   = CY + R * Math.sin(l.theta2);
+
+      ctx.save();
+      ctx.strokeStyle = `rgba(120,190,255,${alpha * 0.6})`;
+      ctx.lineWidth   = 1.2;
+      ctx.shadowBlur  = 6;
+      ctx.shadowColor = 'rgba(100,170,255,0.5)';
+      ctx.beginPath();
+      ctx.moveTo(fx1, fy1);
+      ctx.quadraticCurveTo(l.cpx, l.cpy, fx2, fy2);
+      ctx.stroke();
+
+      // Plasma blob on loop
+      const bx = (1-l.pt)*(1-l.pt)*fx1 + 2*(1-l.pt)*l.pt*l.cpx + l.pt*l.pt*fx2;
+      const by = (1-l.pt)*(1-l.pt)*fy1 + 2*(1-l.pt)*l.pt*l.cpy + l.pt*l.pt*fy2;
+      ctx.fillStyle = `rgba(200,230,255,${alpha * 0.9})`;
+      ctx.shadowBlur = 10; ctx.shadowColor = '#B0D8FF';
+      ctx.beginPath(); ctx.arc(bx, by, 2, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    });
+  }
+
+  // Solar wind particles
+  function drawWind() {
+    wind.forEach(p => {
+      const r    = Math.sqrt((p.x - CX) ** 2 + (p.y - CY) ** 2);
+      const fade = 1 - (r - R) / ((F_CORONA * R * 0.9 - R) || 1);
+      ctx.save();
+      ctx.globalAlpha = p.life * Math.max(0, fade) * 0.35;
+      ctx.fillStyle   = '#FFE8A0';
+      ctx.shadowBlur  = 2; ctx.shadowColor = '#FFD070';
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.sz, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    });
+  }
+
+  // Main star disk: temperature-gradient radial fill
+  function drawStarDisk() {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(CX, CY, R, 0, Math.PI * 2);
+    ctx.clip();
+
+    const g = ctx.createRadialGradient(CX, CY, 0, CX, CY, R);
+    // Core → radiative → convective → photosphere
+    g.addColorStop(0.00, '#E0ECFF'); // core: 15 MK → blue-white
+    g.addColorStop(0.12, '#D0DEFF');
+    g.addColorStop(0.20, '#FFE8C8'); // radiative inner
+    g.addColorStop(0.50, '#FFD090');
+    g.addColorStop(0.65, '#FFC060'); // conv zone inner
+    g.addColorStop(0.82, '#FFAA40');
+    g.addColorStop(0.94, '#FFD870'); // photosphere: 5778 K → yellow-white
+    g.addColorStop(1.00, '#FFE880');
+    ctx.fillStyle = g;
+    ctx.fillRect(CX - R, CY - R, R * 2, R * 2);
+    ctx.restore();
+  }
+
+  // Convective zone particles (flowing plasma)
+  function drawConvParts() {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(CX, CY, R, 0, Math.PI * 2);
+    ctx.clip();
+    convParts.forEach(p => {
+      const t  = p.temp;
+      // Hot = blue-white, cool = red-orange
+      const r_ = Math.round(180 + t * 75);
+      const g_ = Math.round(100 + t * 100);
+      const b_ = Math.round(30  + t * 225);
+      ctx.save();
+      ctx.globalAlpha = 0.45 + t * 0.35;
+      ctx.fillStyle   = `rgb(${r_},${g_},${b_})`;
+      ctx.shadowBlur  = 3; ctx.shadowColor = `rgb(${r_},${g_},${b_})`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.sz, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    });
+    ctx.restore();
+  }
+
+  // Photosphere granulation — convection cells visible at the surface
+  function drawGranules() {
+    ctx.save();
+    // Clip to a thin annulus: from 0.88R to R
+    ctx.beginPath();
+    ctx.arc(CX, CY, R, 0, Math.PI * 2);
+    ctx.arc(CX, CY, R * 0.80, 0, Math.PI * 2, true);
+    ctx.clip();
+
+    granules.forEach(g => {
+      const t  = g.age / g.life;
+      const a  = t < 0.1 ? t * 10 : t > 0.9 ? (1 - t) * 10 : 1;
+      const gd = ctx.createRadialGradient(g.cx, g.cy, 0, g.cx, g.cy, g.r);
+      gd.addColorStop(0,   `rgba(255,235,170,${a * 0.65})`);
+      gd.addColorStop(0.55,`rgba(255,180, 80,${a * 0.30})`);
+      gd.addColorStop(1,   'rgba(0,0,0,0)');
+      ctx.fillStyle = gd;
+      ctx.beginPath(); ctx.arc(g.cx, g.cy, g.r, 0, Math.PI * 2); ctx.fill();
+    });
+    ctx.restore();
+  }
+
+  // Radiative zone photon walkers
+  function drawRadParts() {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(CX, CY, F_RAD * R, 0, Math.PI * 2);
+    ctx.arc(CX, CY, F_CORE * R, 0, Math.PI * 2, true);
+    ctx.clip();
+    radParts.forEach(p => {
+      ctx.save();
+      ctx.globalAlpha = p.brightness * 0.55;
+      ctx.fillStyle   = '#FFEEDD';
+      ctx.shadowBlur  = 5; ctx.shadowColor = '#FFCC80';
+      ctx.beginPath(); ctx.arc(p.x, p.y, 1.6, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    });
+    ctx.restore();
+  }
+
+  // Core: fast thermal particles + fusion flashes
+  function drawCore() {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(CX, CY, F_CORE * R, 0, Math.PI * 2);
+    ctx.clip();
+
+    // Dense hot glow
+    const cg = ctx.createRadialGradient(CX, CY, 0, CX, CY, F_CORE * R);
+    cg.addColorStop(0,   'rgba(255,255,255,0.55)');
+    cg.addColorStop(0.4, 'rgba(200,220,255,0.25)');
+    cg.addColorStop(1,   'rgba(160,190,255,0.05)');
+    ctx.fillStyle = cg;
+    ctx.fillRect(CX - F_CORE * R, CY - F_CORE * R, F_CORE * R * 2, F_CORE * R * 2);
+
+    coreParts.forEach(p => {
+      ctx.save();
+      ctx.globalAlpha = 0.65;
+      ctx.fillStyle   = `hsl(${p.hue},90%,80%)`;
+      ctx.shadowBlur  = 4; ctx.shadowColor = '#AACCFF';
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.sz, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    });
+
+    // Fusion flashes
+    fusionFlashes.forEach(f => {
+      const fg = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.sz);
+      fg.addColorStop(0,   `rgba(255,255,255,${f.life})`);
+      fg.addColorStop(0.4, `rgba(200,220,255,${f.life * 0.6})`);
+      fg.addColorStop(1,   'rgba(140,180,255,0)');
+      ctx.save();
+      ctx.fillStyle = fg;
+      ctx.shadowBlur = 15; ctx.shadowColor = '#FFFFFF';
+      ctx.beginPath(); ctx.arc(f.x, f.y, f.sz, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    });
+    ctx.restore();
+  }
+
+  // Chromosphere spicules
+  function drawSpicules() {
+    spicules.forEach(s => {
+      const t  = s.age / s.life;
+      const a  = t < 0.3 ? t / 0.3 : t > 0.7 ? (1 - t) / 0.3 : 1;
+      if (s.len < 0.5) return;
+
+      const x1 = CX + R * Math.cos(s.theta);
+      const y1 = CY + R * Math.sin(s.theta);
+      const x2 = CX + (R + s.len) * Math.cos(s.theta);
+      const y2 = CY + (R + s.len) * Math.sin(s.theta);
+
+      const sg = ctx.createLinearGradient(x1, y1, x2, y2);
+      sg.addColorStop(0,   `rgba(255,180,100,${a * 0.95})`);
+      sg.addColorStop(0.5, `rgba(255,120, 70,${a * 0.60})`);
+      sg.addColorStop(1,   `rgba(255, 80, 50,0)`);
+
+      ctx.save();
+      ctx.strokeStyle = sg;
+      ctx.lineWidth   = s.width;
+      ctx.shadowBlur  = 3; ctx.shadowColor = '#FF8844';
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.restore();
+    });
+  }
+
+  // Zone boundary rings (thin dashed guides)
+  function drawZoneBoundaries() {
+    const zones = [
+      { r: F_CORE * R, color: 'rgba(160,190,255,0.18)' },
+      { r: F_RAD  * R, color: 'rgba(255,200,120,0.15)' },
+      { r: F_CHROM* R, color: 'rgba(255,110, 70,0.18)' },
+    ];
+    ctx.save();
+    ctx.setLineDash([3, 7]);
+    ctx.lineWidth = 0.8;
+    zones.forEach(z => {
+      ctx.strokeStyle = z.color;
+      ctx.beginPath(); ctx.arc(CX, CY, z.r, 0, Math.PI * 2); ctx.stroke();
+    });
+    ctx.restore();
+  }
+
+  // ─── Animate ────────────────────────────────────────────────────────────────
+  function update() {
+    simTime++;
+    updateGranules();
+    updateConvParts();
+    updateRadParts();
+    updateCoreParts();
+    maybeFusion();
+    updateSpicules();
+    updateLoops();
+    updateWind();
+  }
+
+  function draw() {
+    drawBackground();
+    drawCorona();
+    drawWind();
+    drawLoops();
+    drawStarDisk();
+    drawConvParts();
+    drawGranules();
+    drawRadParts();
+    drawCore();
+    drawSpicules();
+    drawZoneBoundaries();
+  }
+
+  function animate() {
+    requestAnimationFrame(animate);
+    update();
+    draw();
+  }
+
+  // ─── Init ───────────────────────────────────────────────────────────────────
+  function rebuildAll() {
+    makeBgStars();
+    initGranules();
+    initConvParts();
+    initRadParts();
+    initCoreParts();
+    initSpicules();
+    initLoops();
+    initWind();
+  }
+
+  resize();
+  rebuildAll();
+  animate();
+  </script>
+</body>
+</html>
