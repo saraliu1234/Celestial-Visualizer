@@ -162,7 +162,6 @@
   }
 
   // ─── Background Stars ─────────────────────────────────────────────────────
-  // Each background star is a twinkling point; ~30% show brief diffraction spikes
   const BG = Array.from({ length: 220 }, () => ({
     x:          Math.random(),
     y:          Math.random(),
@@ -174,7 +173,6 @@
     hasDiffrac: Math.random() < 0.28,
   }));
 
-  // Transient meteor/streak stars that cross the sky and fade
   let streaks = Array.from({ length: 7 }, makeStreak);
   function makeStreak() {
     return {
@@ -185,7 +183,7 @@
       life:       0,
       maxLife:    70 + Math.random() * 110,
       brightness: 0.5 + Math.random() * 0.5,
-      delay:      Math.floor(Math.random() * 400), // frames before appearing
+      delay:      Math.floor(Math.random() * 400),
     };
   }
 
@@ -195,7 +193,6 @@
 
     const t = performance.now() * 0.001;
 
-    // Regular stars
     BG.forEach(s => {
       const twk  = 0.3 + 0.55 * Math.sin(s.phase + t * s.twinkleSpd);
       const sx   = s.x * W, sy = s.y * H;
@@ -209,7 +206,6 @@
       ctx.arc(sx, sy, s.r, 0, Math.PI * 2);
       ctx.fill();
 
-      // Diffraction spikes on brighter moments
       if (s.hasDiffrac && twk > 0.55) {
         const spikeA = (twk - 0.55) / 0.45;
         const len    = s.spikeLen * twk * (1 + beatInt * 1.8);
@@ -235,7 +231,6 @@
       ctx.restore();
     });
 
-    // Transient streaking stars
     for (let i = 0; i < streaks.length; i++) {
       const s = streaks[i];
       if (s.delay > 0) { s.delay--; continue; }
@@ -285,14 +280,11 @@
     motionMode: 'circular',
     motionTime: 0,
     lastModeSwitch: 0,
-    // Orbital
     orbitCX: 0, orbitCY: 0,
     orbitRX: 250, orbitRY: 160,
     orbitAngle: 0,
     orbitSpeed: 0.013,
-    // Trail
     trail: [], TRAIL_LEN: 130,
-    // Visual
     recoil: 0, glow: 0,
     baseR: 5,
   };
@@ -323,7 +315,6 @@
         break;
 
       case 'lissajous': {
-        // Classic Lissajous figure — frequency ratio 3:5, rotating phase
         const A  = Math.min(W, H) * 0.36;
         const B  = Math.min(W, H) * 0.26;
         const ks = T * 0.0055;
@@ -333,7 +324,6 @@
       }
 
       case 'figure8': {
-        // Lemniscate of Bernoulli
         const scale = Math.min(W, H) * 0.30;
         const ks    = T * 0.0042;
         const cosK  = Math.cos(ks);
@@ -345,7 +335,6 @@
       }
 
       case 'random': {
-        // Ornstein–Uhlenbeck process — biased random walk with mean-reversion
         star.vx += (Math.random() - 0.5) * 0.8 - star.vx * 0.04;
         star.vy += (Math.random() - 0.5) * 0.6 - star.vy * 0.04;
         const spd = Math.sqrt(star.vx * star.vx + star.vy * star.vy);
@@ -370,7 +359,6 @@
     star.recoil *= 0.84;
     star.glow   *= 0.87;
 
-    // Auto-cycle modes while playing
     if (isPlaying
         && star.motionTime - star.lastModeSwitch > 420
         && Math.random() < 0.004) {
@@ -379,12 +367,30 @@
     }
   }
 
+  function drawTravelStar() {
+    const len = star.trail.length;
+    if (len < 2) return;
+
+    for (let i = 1; i < len; i++) {
+      const t1  = i / len;
+      ctx.save();
+      ctx.globalAlpha = t1 * t1 * 0.52;
+      ctx.strokeStyle = `hsl(${20 + t1 * 35}, 100%, ${45 + t1 * 32}%)`;
+      ctx.lineWidth   = t1 * 5;
+      ctx.lineCap     = 'round';
+      ctx.shadowBlur  = 10;
+      ctx.shadowColor = '#FF9900';
+      ctx.beginPath();
+      ctx.moveTo(star.trail[i - 1].x, star.trail[i - 1].y);
+      ctx.lineTo(star.trail[i].x,     star.trail[i].y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    drawStellarPoint(star.x, star.y);
+  }
+
   // ─── Stellar Point Rendering ──────────────────────────────────────────────
-  // A real star (or its photographic image) shows:
-  //   • a bright Airy-disk core
-  //   • diffraction spikes (primary: H/V; secondary: diagonal)
-  //   • a soft diffuse halo
-  // The spikes flicker independently and flare on beats.
   function drawStellarPoint(cx, cy) {
     const t      = performance.now() * 0.001;
     const scale  = 1 + star.recoil * 0.55;
@@ -408,9 +414,6 @@
     }
 
     // ── Diffraction spikes ────────────────────────────────────────────────
-    // Four spikes along H, V axes (primary) and two diagonals (secondary).
-    // Each spike has an independent flicker and the appearance/disappearance
-    // creates a dynamic, non-static effect.
     const spikes = [
       { angle: 0,            baseLen: 34, w: 2.0, primary: true  },
       { angle: Math.PI * .5, baseLen: 31, w: 2.0, primary: true  },
@@ -419,7 +422,6 @@
     ];
 
     spikes.forEach((sp, i) => {
-      // Each spike flickers at a distinct frequency
       const flicker   = 0.65 + 0.35 * Math.sin(t * (1.0 + i * 0.45) + sp.angle * 2.7 + i);
       const beatBoost = 1 + glow * 2.8;
       const len       = (sp.baseLen + star.recoil * 28) * flicker * beatBoost * scale;
@@ -476,30 +478,6 @@
     ctx.restore();
   }
 
-  function drawTravelStar() {
-    const len = star.trail.length;
-    if (len < 2) return;
-
-    // Comet-tail trail: each segment widens and brightens toward the head
-    for (let i = 1; i < len; i++) {
-      const t1  = i / len;
-      ctx.save();
-      ctx.globalAlpha = t1 * t1 * 0.52;
-      ctx.strokeStyle = `hsl(${20 + t1 * 35}, 100%, ${45 + t1 * 32}%)`;
-      ctx.lineWidth   = t1 * 5;
-      ctx.lineCap     = 'round';
-      ctx.shadowBlur  = 10;
-      ctx.shadowColor = '#FF9900';
-      ctx.beginPath();
-      ctx.moveTo(star.trail[i - 1].x, star.trail[i - 1].y);
-      ctx.lineTo(star.trail[i].x,     star.trail[i].y);
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    drawStellarPoint(star.x, star.y);
-  }
-
   // ─── Explosions ───────────────────────────────────────────────────────────
   let particles = [], shockwaves = [];
 
@@ -535,7 +513,6 @@
     particles.push({ x, y, vx: 0, vy: 0, life: 1, decay: 0.12,
       sz: 22 + intensity * 65, hue: 50, type: 'flash' });
 
-    // Strong beats can flip motion mode
     if (intensity > 0.65 && isPlaying
         && star.motionTime - star.lastModeSwitch > 200
         && Math.random() < 0.38) {
